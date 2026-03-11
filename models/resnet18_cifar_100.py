@@ -31,33 +31,33 @@ class BasicBlock:
         self.input = x
         imgs = x.shape[0]
 
-        layer_start_time = time.time()  # Start timer for the layer
+        layer_start_time = time.perf_counter()  # Start timer for the layer
         out = self.conv1.forward(x)
-        layer_time = time.time() - layer_start_time
+        layer_time = time.perf_counter() - layer_start_time
         images_per_second = imgs / layer_time
         if self.first:
             print(f"Layer: {self.conv1.__class__.__name__}, Time: {layer_time:.4f}s, Performance: {images_per_second:.2f} images/sec")
 
-        layer_start_time = time.time()  # Start timer for the layer
+        layer_start_time = time.perf_counter()  # Start timer for the layer
         out = self.batchnorm1.forward(out)
         out = self.relu1.forward(out)
-        layer_time = time.time() - layer_start_time
+        layer_time = time.perf_counter() - layer_start_time
         images_per_second = imgs / layer_time
         if self.first:
             print(f"Layer: {self.relu1.__class__.__name__}, Time: {layer_time:.4f}s, Performance: {images_per_second:.2f} images/sec")
 
-        layer_start_time = time.time()  # Start timer for the layer
+        layer_start_time = time.perf_counter()  # Start timer for the layer
         out = self.conv2.forward(out)
-        layer_time = time.time() - layer_start_time
+        layer_time = time.perf_counter() - layer_start_time
         out = self.batchnorm2.forward(out)
         images_per_second = imgs / layer_time
         if self.first:
             print(f"Layer: {self.conv2.__class__.__name__}, Time: {layer_time:.4f}s, Performance: {images_per_second:.2f} images/sec")
 
         if self.use_projection:
-            layer_start_time = time.time()  # Start timer for the layer
+            layer_start_time = time.perf_counter()  # Start timer for the layer
             identity = self.projection.forward(x)
-            layer_time = time.time() - layer_start_time
+            layer_time = time.perf_counter() - layer_start_time
             images_per_second = imgs / layer_time
             identity = self.batchnorm_proj.forward(identity)
             if self.first:
@@ -67,9 +67,9 @@ class BasicBlock:
 
         self.output = [out[i] + identity[i] for i in range(len(out))]  # elementwise add
 
-        layer_start_time = time.time()  # Start timer for the layer
+        layer_start_time = time.perf_counter()  # Start timer for the layer
         self.output = self.relu2.forward(self.output)
-        layer_time = time.time() - layer_start_time
+        layer_time = time.perf_counter() - layer_start_time
         if self.first:
             print(f"Layer: {self.relu2.__class__.__name__}, Time: {layer_time:.4f}s, Performance: {images_per_second:.2f} images/sec")
         self.first=False
@@ -131,11 +131,11 @@ class ResNet18_CIFAR100:
             self.layers.append(block)
             in_channels = out_channels  # For next block
 
-    def forward(self, x, curr_iter=1):
+    def forward(self, x, curr_iter=1, training=False):
         for layer in self.layers:
-            layer_start_time = time.time()  # Start timer for the layer
+            layer_start_time = time.perf_counter()  # Start timer for the layer
             x = layer.forward(x)
-            layer_time = time.time() - layer_start_time
+            layer_time = time.perf_counter() - layer_start_time
             if curr_iter == 0 and layer.__class__.__name__ != 'BasicBlock':
                 # Only print for the first iteration
                 # Calculate performance

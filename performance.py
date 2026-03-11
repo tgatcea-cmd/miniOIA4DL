@@ -38,7 +38,7 @@ def perf(model, train_images, train_labels, batch_size=64):
         
     output = batch_images
            
-    output = model.forward(batch_images, curr_iter=i,training=False)
+    output = model.forward(batch_images, curr_iter=i, training=False)
     
     duration = time.time() - start_time
     ips = num_samples / duration
