@@ -23,11 +23,11 @@
 * CHANGED time all time measurements in `resnet18_cifar_100.py` to `time.perf_counter()` as prevention for rounding error (recommendation from inline copilot predictor when searching for `forward(self, x, curr_iter=1)` definition)
 
 # DAY one
-* EXECUTED and LOGGED `$ python main.py --model OIANet > oianet_baseline.log` succesfully.
+* EXECUTED and LOGGED `$ python main.py --model OIANet > ./logs/oianet_baseline.log` succesfully.
 * ANALYZED 'oianet_baseline.log' and got a clear frontier on comparing layer performance (x62.79):
     * SLOWEST LAYERS: Conv2D, Dense, MaxPool2D
     * FASTEST LAYERS: BatchNorm2D, ReLU, Dropout, Softmax, Flatten
-* EXECUTED and LOGGED `$ python main.py --model TinyCNN > tinycnn_baseline.log` succesfully.
+* EXECUTED and LOGGED `$ python main.py --model TinyCNN > ./logs/tinycnn_baseline.log` succesfully.
 * ANALYZED 'tinycnn_baseline.log' and got a clear frontier on comparing layer performance (x9.43):
     * SLOWEST LAYERS: Conv2D, Dense
     * FASTEST LAYERS: BatchNorm2D, ReLU, Dropout, Softmax, Flatten
