@@ -37,3 +37,5 @@
 * ANALYZED 'oianet_(conv=1).log' and got a clear frontier on comparing layer performance (x5.47):
     * SLOWEST LAYERS: Dense, MaxPool2D
     * FASTEST LAYERS: Conv2D, BatchNorm2D, ReLU, Dropout, Softmax, Flatten
+
+cachyos
