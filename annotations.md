@@ -77,4 +77,4 @@ Primarely focused in MaxPool2D layer.
 ![image](./logs/images/layers_oianet_(conv=1_dense=inline_maxpool2d=vectorizado_others=naive).png)
     * SLOWER LAYERS: Conv2D
     * FASTER LAYERS: BatchNorm2D, Dense, ReLU, Softmax, Dropout, Flatten
-* DEEP STUDY of `Conv2D` layer.
+* DEEP STUDY of `Conv2D` layer
