@@ -2,10 +2,10 @@
 Este script está hecho para facilitar la comparación de datos de forma más estable, realiza N runs y calcula el resultado medio.
 '''
 
-my_cmd = ["python", "main.py", "--model", "OIANet", "--conv_algo", "1"]
+my_cmd = ["python", "main.py", "--model", "OIANet", "--conv_algo", "2"]
 
 '''
-conv        => args             (0, 1)
+conv        => args             (0, 1, 2)
 dense       => "utils.py"       (naive, inline)
 maxpool2d   => "maxpool2d.py"   (naive, vectorizado)
 ..
@@ -25,8 +25,14 @@ def run_benchmark(n_runs, output_csv):
     
     for i in range(n_runs):
         print(f"Executing run {i+1}/{n_runs}...")
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"\n[!] FATAL: main.py crashed during run {i+1}.")
+            print(f"--- TRACEBACK FROM MAIN.PY ---")
+            print(e.stderr)
+            print(f"------------------------------")
+            exit(1)
         parsing = False
         row_idx = 0
         

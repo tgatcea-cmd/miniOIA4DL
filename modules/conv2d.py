@@ -17,6 +17,8 @@ class Conv2D(Layer):
             self.mode = 'direct' 
         if conv_algo == 1:
             self.mode = 'im2col_gemm'
+        if conv_algo == 2:
+            self.mode = 'im2col_GEMM_vectorization'
         else:
             print(f"Algoritmo {conv_algo} no soportado aún")
             self.mode = 'direct' 
@@ -64,6 +66,8 @@ class Conv2D(Layer):
             return self._forward_direct(input)
         if self.mode == 'im2col_gemm':
             return self._forward_im2col_GEMM(input)
+        if self.mode == 'im2col_GEMM_vectorization':
+            return self._forward_im2col_GEMM_vectorization(input)
         else:
             raise ValueError("Mode must be 'direct' or 'jeje'")
 
@@ -192,55 +196,160 @@ class Conv2D(Layer):
 
 
 
-
-
-
-
-    # --- im2col IMPLEMENTATION ---
-
+    ### im2col + GEMM #########################################
     def im2col(self, input):
+        ''' Parámetros topológicos iniciales ''' 
         batch_size, _, H, W = input.shape
         k_h, k_w = self.kernel_size, self.kernel_size
         stride = self.stride
         padding = self.padding
 
-        # el padding se hace sobre input
+        # Evita la reducción dimensional abrupta y procesa bordes
+        # Resultado: [B, C, H + 2*padding, W + 2*padding]
         if padding > 0:
             input = np.pad(input, ((0, 0), (0, 0), (padding, padding), (padding, padding)),
-                           mode='constant').astype(np.float32)
+                            mode='constant').astype(np.float32)
             
+        # Cálculo de la dimensión espacial de salida, fórmula estándar de convolución:
+        # O = floor((H - K + 2P) / S) + 1
         H_out = (H + 2 * padding - k_h) // stride + 1
         W_out = (W + 2 * padding - k_w) // stride + 1
         
         cols = []
 
+        # Extracción iterativa de parches. Alta latencia debido al intérprete de Python. (¿cython?)
         for b in range(batch_size):
             for i in range(H_out):
                 for j in range(W_out):
+                    ### Bloque generado por IA #####################
+                    # Extracción del campo local: tensor de dimensión [C, K_h, K_w]
                     patch = input[b, :, i*stride : i*stride + k_h, j*stride : j*stride + k_w]
+                    ### Fin bloque generado por IA #####################
+                    # Aplanamiento a un vector 1D de dimensión [C * K_h * K_w]
                     patch = patch.reshape(-1)
                     cols.append(patch)
         
+        # Transposición final para alinear columnas
+        # Matriz resultante cols de dimensión: [(C * K_h * K_w), (B * H_out * W_out)]
         return np.array(cols).T
 
 
     def _forward_im2col_GEMM(self, input):
+        ''' Parámetros topológicos iniciales ''' 
         batch_size, _, in_h, in_w = input.shape
         k_h, k_w = self.kernel_size, self.kernel_size
         stride = self.stride
         padding = self.padding
 
+        # Construcción de la matriz de entrada cols
         cols = self.im2col(input)
+        
+        # Aplanamiento del filtro
+        # De [Out_C, In_C, K_h, K_w] a matriz W de dimensión [Out_C, (In_C * K_h * K_w)]
         kernel = self.kernels.reshape(self.out_channels, -1)
         
+        # GEMM: Y = W * cols
+        # Multiplicación: [Out_C, In_C*K*K] @ [(In_C*K*K), B*H_out*W_out] -> [Out_C, B*H_out*W_out]
         out_cols = kernel @ cols
+        
+        # Broadcasting del vector de bias [Out_C, 1] sobre las columnas del output
         out_cols += self.biases.reshape(-1, 1)
 
+        # Reconstrucción de la topología espacial
         out_h = (in_h + 2 * padding - k_h) // stride + 1
         out_w = (in_w + 2 * padding - k_w) // stride + 1
 
+        # Desplegado de la matriz plana al tensor 4D intermedio: [Out_C, B, H_out, W_out]
         output = out_cols.reshape(self.out_channels, batch_size, out_h, out_w)
+        
+        # Permutación de ejes para retornar a la convención estándar dimensional NCHW
         output = output.transpose(1, 0, 2, 3)
 
         return output
-    
+    ############################################
+
+
+
+    ### im2col + GEMM + vectorization ######################################### 
+    def im2col_vectorization(self, input):
+        ''' Parámetros topológicos iniciales ''' 
+        batch_size, c, in_h, in_w = input.shape
+        k_h, k_w = self.kernel_size, self.kernel_size
+        stride = self.stride
+        padding = self.padding
+
+        # Evita la reducción dimensional abrupta y procesa bordes
+        # Resultado: [B, C, H + 2*padding, W + 2*padding]
+        if padding > 0:
+            input = np.pad(input, ((0, 0), (0, 0), (padding, padding), (padding, padding)),
+                            mode='constant').astype(np.float32)
+
+        # Cálculo de la dimensión espacial de salida, fórmula estándar de convolución:
+        # O = floor((H - K + 2P) / S) + 1
+        out_h = (in_h + 2 * padding - k_h) // stride + 1
+        out_w = (in_w + 2 * padding - k_w) // stride + 1
+
+
+        ### Bloque generado por IA #####################
+        # Topología del tensor virtual 6D. Captura la posición global del parche (Batch, Canales, H, W) 
+        # y la estructura interna del kernel local (K_h, K_w).
+        shape = (batch_size, c, out_h, out_w, k_h, k_w)
+        
+        # Aritmética de punteros, define saltos de memoria sin instanciar datos nuevos
+        strides = (
+            input.strides[0],          # Salto al siguiente Batch
+            input.strides[1],          # Salto al siguiente Canal
+            input.strides[2] * stride, # Salto espacial vertical entre parches
+            input.strides[3] * stride, # Salto espacial horizontal entre parches
+            input.strides[2],          # Salto local vertical dentro del parche
+            input.strides[3]           # Salto local horizontal dentro del parche
+        )
+        ### Fin de bloque generado por IA ##################
+        
+        # as_strided mapea la vista para ahorrar tiempo y memoria
+        windows = np.lib.stride_tricks.as_strided(input, shape=shape, strides=strides)
+        
+        # Permutación para alinear en memoria los ejes a colapsar: 
+        # Agrupa ejes de características (Canales, K_h, K_w) y ejes de iteración (Batch, out_h, out_w)
+        windows_transposed = windows.transpose(1, 4, 5, 0, 2, 3)
+        
+        # Colapsa las dimensiones
+        # Resultado cols: Matriz [(C * K_h * K_w), (B * H_out * W_out)]
+        cols = windows_transposed.reshape(c * k_h * k_w, -1)
+        
+        return cols
+
+
+    def _forward_im2col_GEMM_vectorization(self, input):
+        ''' Parámetros topológicos iniciales ''' 
+        batch_size, _, in_h, in_w = input.shape
+        k_h, k_w = self.kernel_size, self.kernel_size
+        stride = self.stride
+        padding = self.padding
+
+        # Extraemos la matriz de parches vectorizada
+        cols = self.im2col_vectorization(input)
+        # Aplanamiento de kernels. W: [Out_C, (In_C * K_h * K_w)]
+        kernel = self.kernels.reshape(self.out_channels, -1)
+                
+        # GEMM. Resolución del sistema de convoluciones locales
+        # Y = W * cols
+        out_cols = kernel @ cols
+        
+        # Traslación del Bias. Broadcasting aditivo
+        out_cols += self.biases.reshape(-1, 1)
+
+        # Recálculo de la dimensión espacial de salida para reestructurar el tensor final
+        out_h = (in_h + 2 * padding - k_h) // stride + 1
+        out_w = (in_w + 2 * padding - k_w) // stride + 1
+
+        # Reestructuración a la dimensionalidad 4D final.
+        # De [Out_C, B*H_out*W_out] -> [Out_C, B, H_out, W_out]
+        output = out_cols.reshape(self.out_channels, batch_size, out_h, out_w)
+        
+        # Conversión topológica final NCHW: [B, Out_C, H_out, W_out]
+        output = output.transpose(1, 0, 2, 3)
+
+        return output
+    ############################################
+        
