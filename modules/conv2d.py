@@ -1,6 +1,10 @@
 from modules.layer import Layer
 from modules.utils import *
-#from cython_modules.im2col import im2col_forward_cython
+
+### Funciones implementadas en Cython ####################
+from cython_modules.im2col import im2col_forward_cython
+from cython_modules.gemm import gemm_forward_cython
+################################
 
 import numpy as np
 
@@ -15,13 +19,15 @@ class Conv2D(Layer):
         # MODIFICAR: Añadir nuevo if-else para otros algoritmos de convolución
         if conv_algo == 0:
             self.mode = 'direct' 
-        if conv_algo == 1:
+        elif conv_algo == 1:
             self.mode = 'im2col_gemm'
-        if conv_algo == 2:
+        elif conv_algo == 2:
             self.mode = 'im2col_GEMM_vectorization'
+        elif conv_algo == 3:
+            self.mode = 'im2col_GEMM_cython'
         else:
             print(f"Algoritmo {conv_algo} no soportado aún")
-            self.mode = 'direct' 
+            self.mode = 'direct'
 
         fan_in = in_channels * kernel_size * kernel_size
         fan_out = out_channels * kernel_size * kernel_size
@@ -43,13 +49,13 @@ class Conv2D(Layer):
 
         # PISTA: Y estos valores para qué las podemos utilizar?
         # Si los usas, no olvides utilizar el modelo explicado en teoría que maximiza la caché
-        self.mc = 480
-        self.nc = 3072
-        self.kc = 384
-        self.mr = 32
-        self.nr = 12
-        self.Ac = np.empty((self.mc, self.kc), dtype=np.float32)
-        self.Bc = np.empty((self.kc, self.nc), dtype=np.float32)
+        # self.mc = 480
+        # self.nc = 3072
+        # self.kc = 384
+        # self.mr = 32
+        # self.nr = 12
+        # self.Ac = np.empty((self.mc, self.kc), dtype=np.float32)
+        # self.Bc = np.empty((self.kc, self.nc), dtype=np.float32)
 
 
     def get_weights(self):
@@ -68,8 +74,10 @@ class Conv2D(Layer):
             return self._forward_im2col_GEMM(input)
         if self.mode == 'im2col_GEMM_vectorization':
             return self._forward_im2col_GEMM_vectorization(input)
+        if self.mode == 'im2col_GEMM_cython':
+            return self._forward_im2col_GEMM_cython(input)
         else:
-            raise ValueError("Mode must be 'direct' or 'jeje'")
+            raise ValueError("Mode must be 'direct' | 'im2col_gemm' | 'im2col_GEMM_vectorization' | 'im2col_GEMM_cython'")
 
     def backward(self, grad_output, learning_rate):
         # ESTO NO ES NECESARIO YA QUE NO VAIS A HACER BACKPROPAGATION
@@ -196,160 +204,166 @@ class Conv2D(Layer):
 
 
 
-    ### im2col + GEMM #########################################
+    ### im2col + GEMM ##########################################
     def im2col(self, input):
-        ''' Parámetros topológicos iniciales ''' 
         batch_size, _, H, W = input.shape
         k_h, k_w = self.kernel_size, self.kernel_size
-        stride = self.stride
-        padding = self.padding
+        stride, padding = self.stride, self.padding
 
-        # Evita la reducción dimensional abrupta y procesa bordes
-        # Resultado: [B, C, H + 2*padding, W + 2*padding]
+        # Extendemos los bordes del tensor para mantener la dimensión espacial
+        # sin padding, cada convolución reduce H y W en (kernel-1) píxeles
         if padding > 0:
-            input = np.pad(input, ((0, 0), (0, 0), (padding, padding), (padding, padding)),
-                            mode='constant').astype(np.float32)
-            
-        # Cálculo de la dimensión espacial de salida, fórmula estándar de convolución:
-        # O = floor((H - K + 2P) / S) + 1
-        H_out = (H + 2 * padding - k_h) // stride + 1
-        W_out = (W + 2 * padding - k_w) // stride + 1
-        
+            input = np.pad(input, ((0,0),(0,0),(padding,padding),(padding,padding)),
+                        mode='constant').astype(np.float32)
+
+        # Calculamos las dimensiones de salida: fórmula estándar O = floor((H - K + 2P) / S) + 1
+        H_out = (H + 2*padding - k_h) // stride + 1
+        W_out = (W + 2*padding - k_w) // stride + 1
+
         cols = []
 
-        # Extracción iterativa de parches. Alta latencia debido al intérprete de Python. (¿cython?)
+        # Extraemos los parches:
+        #    -> por cada posición (i,j) del mapa de salida
+        #    -> recortamos un bloque [C, K_h, K_w] del input original
+        #    -> lo aplanamos
         for b in range(batch_size):
             for i in range(H_out):
                 for j in range(W_out):
-                    ### Bloque generado por IA #####################
-                    # Extracción del campo local: tensor de dimensión [C, K_h, K_w]
-                    patch = input[b, :, i*stride : i*stride + k_h, j*stride : j*stride + k_w]
-                    ### Fin bloque generado por IA #####################
-                    # Aplanamiento a un vector 1D de dimensión [C * K_h * K_w]
-                    patch = patch.reshape(-1)
-                    cols.append(patch)
-        
-        # Transposición final para alinear columnas
-        # Matriz resultante cols de dimensión: [(C * K_h * K_w), (B * H_out * W_out)]
+                    patch = input[b, :, i*stride : i*stride+k_h, j*stride : j*stride+k_w]
+                    cols.append(patch.reshape(-1))  # aplanar [C,K,K] → [C·K·K]
+
+        # Transponemos cada columna para que sean respectivamente un parche aplanado
+        # -> [C*K*K, B*H_out*W_out]
         return np.array(cols).T
 
 
     def _forward_im2col_GEMM(self, input):
-        ''' Parámetros topológicos iniciales ''' 
         batch_size, _, in_h, in_w = input.shape
         k_h, k_w = self.kernel_size, self.kernel_size
-        stride = self.stride
-        padding = self.padding
+        stride, padding = self.stride, self.padding
 
-        # Construcción de la matriz de entrada cols
+        # Convertimos la entrada en columnas de parches
         cols = self.im2col(input)
-        
-        # Aplanamiento del filtro
-        # De [Out_C, In_C, K_h, K_w] a matriz W de dimensión [Out_C, (In_C * K_h * K_w)]
+
+        # Aplanamos los filtos de [Out_C, In_C, K, K] a [Out_C, C*K*K].
+        # Cada fila será finalmente un filtro completo "desenrollado"
         kernel = self.kernels.reshape(self.out_channels, -1)
-        
-        # GEMM: Y = W * cols
-        # Multiplicación: [Out_C, In_C*K*K] @ [(In_C*K*K), B*H_out*W_out] -> [Out_C, B*H_out*W_out]
+
+        # Una sola multiplicación matricial reemplaza todas las convoluciones
+        # [Out_C, C*K*K] @ [C*K*K, B*Ho*Wo] → [Out_C, B*Ho*Wo]
         out_cols = kernel @ cols
-        
-        # Broadcasting del vector de bias [Out_C, 1] sobre las columnas del output
-        out_cols += self.biases.reshape(-1, 1)
+        out_cols += self.biases.reshape(-1, 1)  # bias: broadcasting sobre columnas
 
-        # Reconstrucción de la topología espacial
-        out_h = (in_h + 2 * padding - k_h) // stride + 1
-        out_w = (in_w + 2 * padding - k_w) // stride + 1
-
-        # Desplegado de la matriz plana al tensor 4D intermedio: [Out_C, B, H_out, W_out]
+        # Devolvemos el formato 4D estándar NCHW: [B, Out_C, H_out, W_out]
+        out_h = (in_h + 2*padding - k_h) // stride + 1
+        out_w = (in_w + 2*padding - k_w) // stride + 1
         output = out_cols.reshape(self.out_channels, batch_size, out_h, out_w)
-        
-        # Permutación de ejes para retornar a la convención estándar dimensional NCHW
-        output = output.transpose(1, 0, 2, 3)
-
-        return output
-    ############################################
+        return output.transpose(1, 0, 2, 3)
+    ### Fin de im2col + GEMM ##########################################
 
 
 
-    ### im2col + GEMM + vectorization ######################################### 
+
+
+    ### im2col + GEMM + vectorización ##########################################
     def im2col_vectorization(self, input):
-        ''' Parámetros topológicos iniciales ''' 
         batch_size, c, in_h, in_w = input.shape
         k_h, k_w = self.kernel_size, self.kernel_size
-        stride = self.stride
-        padding = self.padding
+        stride, padding = self.stride, self.padding
 
-        # Evita la reducción dimensional abrupta y procesa bordes
-        # Resultado: [B, C, H + 2*padding, W + 2*padding]
         if padding > 0:
-            input = np.pad(input, ((0, 0), (0, 0), (padding, padding), (padding, padding)),
-                            mode='constant').astype(np.float32)
+            input = np.pad(input, ((0,0),(0,0),(padding,padding),(padding,padding)), 
+                        mode='constant').astype(np.float32)
 
-        # Cálculo de la dimensión espacial de salida, fórmula estándar de convolución:
-        # O = floor((H - K + 2P) / S) + 1
-        out_h = (in_h + 2 * padding - k_h) // stride + 1
-        out_w = (in_w + 2 * padding - k_w) // stride + 1
+        out_h = (in_h + 2*padding - k_h) // stride + 1
+        out_w = (in_w + 2*padding - k_w) // stride + 1
 
-
-        ### Bloque generado por IA #####################
-        # Topología del tensor virtual 6D. Captura la posición global del parche (Batch, Canales, H, W) 
-        # y la estructura interna del kernel local (K_h, K_w).
+        # Definir un tensor de 6 dimensiones sin copiar datos: [B, C, H_out, W_out, K_h, K_w]
+        # las 4 primeras indican "qué parche"
+        # las 2 últimas "posición dentro del parche"
         shape = (batch_size, c, out_h, out_w, k_h, k_w)
-        
-        # Aritmética de punteros, define saltos de memoria sin instanciar datos nuevos
+
+        ### Bloque generado por IA #############
+        # Le dice a NumPy cuántos bytes saltar en cada eje.
+        # No se copia memoria, solo se reinterpreta el buffer existente.
         strides = (
-            input.strides[0],          # Salto al siguiente Batch
-            input.strides[1],          # Salto al siguiente Canal
-            input.strides[2] * stride, # Salto espacial vertical entre parches
-            input.strides[3] * stride, # Salto espacial horizontal entre parches
-            input.strides[2],          # Salto local vertical dentro del parche
-            input.strides[3]           # Salto local horizontal dentro del parche
+            input.strides[0],            # salto entre batches
+            input.strides[1],            # salto entre canales
+            input.strides[2] * stride,   # salto vertical entre parches
+            input.strides[3] * stride,   # salto horizontal entre parches
+            input.strides[2],            # salto vertical DENTRO del parche
+            input.strides[3]             # salto horizontal DENTRO del parche
         )
-        ### Fin de bloque generado por IA ##################
-        
-        # as_strided mapea la vista para ahorrar tiempo y memoria
-        windows = np.lib.stride_tricks.as_strided(input, shape=shape, strides=strides)
-        
-        # Permutación para alinear en memoria los ejes a colapsar: 
-        # Agrupa ejes de características (Canales, K_h, K_w) y ejes de iteración (Batch, out_h, out_w)
+
+        # as_strided crea la vista 6D
+        windows = np.lib.stride_tricks.as_strided(input, shape=shape, strides=strides)    
+
+        # Permutamos los ejes para que las dimensiones a colapsar queden juntas
+        # [C, K_h, K_w, B, H_out, W_out]
         windows_transposed = windows.transpose(1, 4, 5, 0, 2, 3)
-        
-        # Colapsa las dimensiones
-        # Resultado cols: Matriz [(C * K_h * K_w), (B * H_out * W_out)]
-        cols = windows_transposed.reshape(c * k_h * k_w, -1)
-        
-        return cols
+        ### Fin de bloque generado por IA #############
+
+        # Aplanar en matriz [C*K*K, B*H_out*W_out]
+        return windows_transposed.reshape(c * k_h * k_w, -1)
 
 
     def _forward_im2col_GEMM_vectorization(self, input):
-        ''' Parámetros topológicos iniciales ''' 
         batch_size, _, in_h, in_w = input.shape
         k_h, k_w = self.kernel_size, self.kernel_size
-        stride = self.stride
-        padding = self.padding
+        stride, padding = self.stride, self.padding
 
-        # Extraemos la matriz de parches vectorizada
+        # Convertimos la entrada en columnas de parches (vVectorizada)
         cols = self.im2col_vectorization(input)
-        # Aplanamiento de kernels. W: [Out_C, (In_C * K_h * K_w)]
+
+        # Aplanamos los filtos de [Out_C, In_C, K, K] a [Out_C, C*K*K].
+        # Cada fila será finalmente un filtro completo "desenrollado"
         kernel = self.kernels.reshape(self.out_channels, -1)
-                
-        # GEMM. Resolución del sistema de convoluciones locales
-        # Y = W * cols
+
+        # Una sola multiplicación matricial reemplaza todas las convoluciones
+        # [Out_C, C*K*K] @ [C*K*K, B*Ho*Wo] → [Out_C, B*Ho*Wo]
         out_cols = kernel @ cols
-        
-        # Traslación del Bias. Broadcasting aditivo
-        out_cols += self.biases.reshape(-1, 1)
+        out_cols += self.biases.reshape(-1, 1)  # bias: broadcasting sobre columnas
 
-        # Recálculo de la dimensión espacial de salida para reestructurar el tensor final
-        out_h = (in_h + 2 * padding - k_h) // stride + 1
-        out_w = (in_w + 2 * padding - k_w) // stride + 1
-
-        # Reestructuración a la dimensionalidad 4D final.
-        # De [Out_C, B*H_out*W_out] -> [Out_C, B, H_out, W_out]
+        # Devolvemos el formato 4D estándar NCHW: [B, Out_C, H_out, W_out]
+        out_h = (in_h + 2*padding - k_h) // stride + 1
+        out_w = (in_w + 2*padding - k_w) // stride + 1
         output = out_cols.reshape(self.out_channels, batch_size, out_h, out_w)
-        
-        # Conversión topológica final NCHW: [B, Out_C, H_out, W_out]
-        output = output.transpose(1, 0, 2, 3)
+        return output.transpose(1, 0, 2, 3)
+    ### Fin de im2col + GEMM + vectorización ##########################################
 
-        return output
-    ############################################
+
+
+
+
+    ### (im2col + GEMM) @ cython ##########################################
+    # ANOTACION: En esta versión es preferible declarar el tipo np.float32 para evitar
+    # problemas de interpretación en la parte C.
+    def _forward_im2col_GEMM_cython(self, input):
+        batch_size, _, in_h, in_w = input.shape
+        k_h, k_w = self.kernel_size, self.kernel_size
+        stride, padding = self.stride, self.padding
+
+        # Forzamos una organización contigua en memoria antes de pasar a C,
+        # pues Cython lo requiere para acceso directo al puntero
+        input_cython = np.ascontiguousarray(input, dtype=np.float32)
+
+        # Convertimos la entrada en columnas de parches (vCython)
+        cols = im2col_forward_cython(input_cython, k_h, k_w, stride, padding).astype(np.float32)
+
+        # Aplanamos los filtos de [Out_C, In_C, K, K] a [Out_C, C*K*K].
+        # Cada fila será finalmente un filtro completo "desenrollado".
+        kernel = self.kernels.reshape(self.out_channels, -1).astype(np.float32)
+
+        # GEMM también en Cython: evita overhead de numpy para matrices float32 pequeñas
+        out_cols = np.zeros((kernel.shape[0], cols.shape[1]), dtype=np.float32)
+        gemm_forward_cython(kernel, cols, out_cols) # escribe el resultado en out_cols
+
+        out_cols += self.biases.reshape(-1, 1) # bias: broadcasting sobre columnas
+
+        # Devolvemos el formato 4D estándar NCHW: [B, Out_C, H_out, W_out]
+        out_h = (in_h + 2*padding - k_h) // stride + 1
+        out_w = (in_w + 2*padding - k_w) // stride + 1
+        output = out_cols.reshape(self.out_channels, batch_size, out_h, out_w)
+        return output.transpose(1, 0, 2, 3)
+    ### Fin de (im2col + GEMM) @ cython ##########################################
         

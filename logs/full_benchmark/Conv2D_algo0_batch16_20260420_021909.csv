@@ -1,0 +1,2 @@
+timestamp,module,algo,batch_size,input_shape,avg_time_ms,ips
+20260420_021909,Conv2D,0,16,"(16, 3, 32, 32)",8103.4722328186035,0.12340389048907413

@@ -1,0 +1,34 @@
+--- Benchmarking Conv2D - Direct (Naive Loops) ---
+Avg Time: 8219.785ms | IPS: 0.12
+
+--- Benchmarking Conv2D - im2col + GEMM (NumPy) ---
+Avg Time: 30.337ms | IPS: 32.96
+
+--- Benchmarking Conv2D - im2col + GEMM (Vectorized) ---
+Avg Time: 8.067ms | IPS: 123.97
+
+--- Benchmarking Conv2D - im2col + GEMM (Cython) ---
+Avg Time: 4.272ms | IPS: 234.09
+
+
+
+--- Benchmarking MaxPool2D - Naive ---
+Avg Time: 744.380ms | IPS: 1.34
+
+--- Benchmarking MaxPool2D - Vectorization ---
+Avg Time: 8.807ms | IPS: 113.54
+
+--- Benchmarking MaxPool2D - Cython ---
+Avg Time: 2.373ms | IPS: 421.44
+
+
+
+
+--- Benchmarking Dense - Naive ---
+Avg Time: 9105.007ms | IPS: 0.11
+
+--- Benchmarking Dense - Inline (NumPy) ---
+Avg Time: 4.406ms | IPS: 226.95
+
+--- Benchmarking Dense - Blocking ---
+Avg Time: 4.227ms | IPS: 236.59

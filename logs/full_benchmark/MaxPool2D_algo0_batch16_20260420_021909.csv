@@ -1,0 +1,2 @@
+timestamp,module,algo,batch_size,input_shape,avg_time_ms,ips
+20260420_021909,MaxPool2D,0,16,"(16, 32, 32, 32)",730.5019855499268,1.3689216727415099

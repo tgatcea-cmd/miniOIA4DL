@@ -4,9 +4,11 @@ from modules.layer import Layer
 import numpy as np
 
 class Dense(Layer):
-    def __init__(self, in_features, out_features,weight_init="he"):
+    def __init__(self, in_features, out_features,weight_init="he", matmul_algo=0):
         self.in_features = in_features
         self.out_features = out_features
+        
+        self.matmul_algo = matmul_algo
 
         if weight_init == "he":
             std = np.sqrt(2.0 / in_features)
@@ -29,7 +31,9 @@ class Dense(Layer):
 
         output = np.zeros((batch_size, self.out_features),dtype=np.float32)
  
-        output = matmul_biasses(self.input, self.weights, output, self.biases)
+        # Función principal de una neurona. Multiples variantes de implementación en utils.py
+        output = matmul_biases(self.input, self.weights, output, self.biases, self.matmul_algo)
+ 
         self.output = output
         return output
 

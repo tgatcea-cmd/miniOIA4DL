@@ -1,0 +1,2 @@
+timestamp,module,algo,batch_size,input_shape,avg_time_ms,ips
+20260420_021909,Dense,1,16,"(16, 512)",4.393768310546875,227.59506858829658

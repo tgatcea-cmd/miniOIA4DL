@@ -91,54 +91,68 @@ Worked on retrieving as much as possible from previous progress.
     * FASTER LAYERS: BatchNorm2D, Dense, ReLU, Softmax, Dropout, Flatten
 * DEEP STUDY of `Conv2D` layer
 
+## DAY five & six
+* SUMMARIZED days five, six and six+1/2.
+* STUDIED theory on AI environment optimization from `S3` and `S4`.
+* STUDIED from internet sources.
+* APPLIED theoretical concepts of Cython tp code `Conv2D`, `Dense`, and `MaxPool2D` optimized variants.
+* BENCHMARKING and TESTING: Memory Latency Bottleneck.
+* TARGET: move execution towards Compute Bound.
+        * CACHE BLOCKING: Partition into blocks fitting in cache. Avoids RAM fetches.
+        * DATA PACKING: Copies data to contiguous buffers before micro-kernels. Enables efficient SIMD loads.
+        * MICRO-KERNELS & SIMD: Loop unrolling for the innermost loop. Targets CPU vector registers to maximize FLOPS/cycle.
+        * MULTITHREADING: OpenMP applied to outer loops (`prange`). Bypasses Python's GIL. Enables concurrent execution on multiple physical cores.
+* BENCHMARKING and TESTING: Performance jumps from ~0.11 IPS (batch 8) to ~474 IPS (batch 176).
+* MAIN ADDITIONS:
+        * Benchmarking tools: `benchmark_suite.py`, `benchmark_script.py`.
+        * Conv2D: `cython` approach.
+        * MaxPool2D: `cython` approach.
+        * Dense (matmul_biasses): `Blocking` approach.
+
 ---
 # ARCHITECTURAL OVERHAUL SUMMARY
-Performance optimizations applied sequentially across framework layers to eliminate Python bottlenecks and maximize hardware Arithmetic Intensity. 
+Performance optimizations applied sequentially to move the framework from **Memory Bound** (Python overhead + RAM latency) to **Compute Bound** (Hardware saturation).
 
 Performance Trajectory (OIANet):
-* Day 0 (Baseline): 0.11 images/sec. Interpreter bounded.
-* Day 4 (Optimized): 120.85 images/sec. Layers strictly routed to C-compiled BLAS and SIMD micro-kernels. `Conv2D`, `Dense`, and `MaxPool2D` upgraded from naive loops to vectorized execution.
-
+* **Day 0 (Baseline)**: 0.11 images/sec. Loop-bound in Python.
+* **Day 4 (Vectorized)**: 120.85 images/sec. Efficient Numpy views + BLAS.
+* **Day 6 (Cython Optimized)**: 474.2 images/sec. Low-level hardware affinity.
 
 ## Module-Level Documentation
 
-### 1. Layer: `Conv2D` (conv2d.py)
+### 1. Layer: `Conv2D` (conv2d.py, gemm.pyx, im2col.pyx)
+Converts spatial convolutions into high-performance matrix operations.
 
-Handles spatial convolutions. Implements three algorithmic tiers controllable via the `conv_algo` parameter.
+* **Mode 0: Direct (Naive)**
+    * *Mechanism*: 7-level nested loop. Scalar ops.
+    * *Status*: Deprecated. Destroys Arithmetic Intensity.
+* **Mode 1: IM2COL + GEMM (Python)**
+    * *Mechanism*: Flattens patches via loops. 
+    * *Status*: Suboptimal due to list reallocation overhead.
+* **Mode 2: IM2COL Virtual (Vectorized)**
+    * *Mechanism*: `as_strided` for $O(1)$ virtual tensor views.
+    * *Theory*: Reuses BLAS via `@`. Maximizes Spatial Locality.
+* **Mode 3: Cython GEMM (Optimized)**
+    * *Mechanism*: Custom C-extension.
+    * *Theory*: 
+        * **Cache Blocking (Tiling)**: Partitions matrices into $mc \times kc$ blocks to fit in L2/L3 cache, reducing RAM fetches (S3).
+        * **Data Packing**: Copies blocks into contiguous buffers ($Ac, Bc$) to enable unit-stride access and eliminate Cache Misses.
+        * **Micro-kernels**: Innermost $mr \times nr$ loops unrolled to saturate CPU vector registers.
+        * **OpenMP**: `prange` parallelism bypasses Python GIL for multi-core scaling.
 
-* Mode 0: Direct (Naive)
-    * Mechanism: 7-level nested loop iterating over $[Batch, Out\_C, In\_C, Out\_H, Out\_W, K_H, K_W]$.
-    * Status: Deprecated. Arithmetic intensity destroyed by scalar operations and dynamic type-checking in Python.
-* Mode 1: IM2COL + GEMM (Python Loops)
-    * Mechanism: Flattens spatial patches into a matrix using 3-level loops and `cols.append()`. Computes via `@` operator.
-    * Status: Suboptimal. Matrix multiplication is fast (BLAS), but memory fragmentation and Python list reallocation during `im2col` data preparation bottleneck execution.
-* Mode 2: IM2COL + GEMM + Vectorized
-    * Mechanism: Zero Python loops. 
-        1.  `np.lib.stride_tricks.as_strided` generates a 6D virtual tensor view $[B, C, OH, OW, K_H, K_W]$ using pointer arithmetic. Zero initial memory duplication.
-        2.  `.transpose().reshape(-1)` flattens the view into standard IM2COL matrices.
-        3.  `kernel @ cols` delegates computation to BLAS.
-    * Status: Optimal. Maximizes L1/L2 cache utilization.
+### 2. Layer: `MaxPool2D` (maxpool2d.py, maxpool2d.pyx)
+Downsampling and gradient routing.
 
-### 2. Layer: `MaxPool2D` (maxpool2d.py)
-
-Executes spatial downsampling and caches gradient routing indices.
-
-* Naive Approach: 4-level loop $[B, C, OH, OW]$ extracting windows and computing scalar maximums. Interpreter overhead saturates CPU.
-* Vectorized Approach:
-    * Forward Pass: Utilizes `sliding_window_view` to map overlapping patches. A single `np.max(windows, axis=(4, 5))` command shifts execution to SIMD reductions.
-    * Training State: `np.argmax` extracts 1D indices from a flattened view. Coordinates are translated to absolute grid coordinates via tensor broadcasting (`abs_i = max_i + grid_i`). Allows strictly parallelized tracking of active gradients.
+* **Vectorized**: `sliding_window_view` + `np.max`. Leverages C-backend SIMD reductions.
+* **Cython**: Direct C-access to memory pointers. Manual memory management avoids overhead of creating intermediate Numpy objects during pooling, crucial for low-latency inference.
 
 ### 3. Layer: `Dense` (dense.py, utils.py)
+Linear mapping $Y = XW^T + b$.
 
-Linear transformation mapping $Y = XW^T + b$.
-
-* Naive Approach: 3-level nested loop $O(M \cdot N \cdot P)$. Highly susceptible to memory latency.
-* Optimized Inline Approach: 
-    * Replaced explicit loops with `np.matmul(A, B, out=C)`. 
-    * Memory Efficiency: The `out=C` parameter forces in-place modification, preventing the allocation of intermediate ghost arrays. Bias is added via vectorized broadcasting.
+* **Inline Approach**: `np.matmul(out=C)` prevents allocation of "ghost arrays".
+* **Blocking Approach**: Implements manual tiling for the product. Improves Temporal Locality by reusing data already loaded into cache lines across multiple dot products.
 
 ---
 
 ### Implementation Directives
-* All active mathematical transformations utilize `np.float32` for memory alignment and numerical stability across BLAS parameters.
-* Execution strictly adheres to NCHW dimensional format at inputs and outputs, transposing intermediate IM2COL/GEMM geometries only during computation.
+* **Hardware Affinity**: All optimizations target the Ryzen 5 3400G cache hierarchy (L1d: 32KB, L2: 512 KB, L3: 4 MB).

@@ -1,0 +1,2 @@
+timestamp,module,algo,batch_size,input_shape,avg_time_ms,ips
+20260420_021909,BatchNorm2D,0,16,"(16, 32, 32, 32)",1.1935949325561523,837.8051654914807
